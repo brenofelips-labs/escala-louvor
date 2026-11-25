@@ -3,6 +3,7 @@ import { MonthPicker } from '@/components/month-picker'
 import { PageHeader } from '@/components/page-header'
 import { monthLabel } from '@/lib/domain/months'
 import { buildServiceDays, dateKey } from '@/lib/scheduler/serviceDays'
+import { isAutomaticScheduleMember } from '@/lib/scheduler/generate'
 import { listExceptions, loadFormation, loadMembers, loadUnavailable } from '@/server/queries'
 import { AvailabilityBoard, type RoleGroup } from './availability-board'
 
@@ -51,7 +52,7 @@ export default async function AvailabilityPage({
     }
   })
 
-  const ativos = members.filter((m) => m.active)
+  const ativos = members.filter(isAutomaticScheduleMember)
 
   const groups: RoleGroup[] = ROLES.map((role: Role) => ({
     role,

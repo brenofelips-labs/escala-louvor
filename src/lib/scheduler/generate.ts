@@ -6,7 +6,7 @@ import {
   type ServiceKind,
 } from '@/lib/domain/types'
 import { createRng, type Rng } from './rng'
-import { assignTeams, type RotationTeam } from './rotation'
+import { assignTeams, rotationPairKey, type RotationTeam } from './rotation'
 import { buildServiceDays, dateKey } from './serviceDays'
 
 export type GeneratorMember = {
@@ -74,6 +74,10 @@ export type GeneratedSchedule = {
   warnings: GenerationWarning[]
 }
 
+export function isAutomaticScheduleMember(member: GeneratorMember): boolean {
+  return member.active && member.name.trim().toUpperCase() !== 'PROJETO TACI'
+}
+
 /** Chave usada no `Set` de indisponibilidades. */
 export function unavailableKey(memberId: string, date: Date): string {
   return `${memberId}:${dateKey(date)}`
@@ -117,24 +121,16 @@ function lineupToPreferred(lineup: GeneratedAssignment[]): Preferred {
   return map
 }
 
-function seedPending(history: GeneratedEntry[]): Map<string, Preferred> {
-  const daysByTeam = new Map<string, Map<string, GeneratedEntry>>()
+function seedPairPreferences(history: GeneratedEntry[], teamCount: number): Map<string, Preferred> {
+  const preferences = new Map<string, Preferred>()
 
   for (const entry of [...history].sort((a, b) => a.order - b.order)) {
     if (!entry.teamId || entry.exception) continue
-    const days = daysByTeam.get(entry.teamId) ?? new Map<string, GeneratedEntry>()
-    if (!days.has(dateKey(entry.date))) days.set(dateKey(entry.date), entry)
-    daysByTeam.set(entry.teamId, days)
+    const key = rotationPairKey(entry.date, entry.teamId, teamCount)
+    if (!preferences.has(key)) preferences.set(key, lineupToPreferred(entry.assignments))
   }
 
-  const pending = new Map<string, Preferred>()
-  for (const [teamId, days] of daysByTeam) {
-    if (days.size % 2 === 0) continue
-    const last = [...days.values()].sort((a, b) => a.date.getTime() - b.date.getTime()).pop()!
-    pending.set(teamId, lineupToPreferred(last.assignments))
-  }
-
-  return pending
+  return preferences
 }
 
 function bump(counter: Map<string, number>, id: string) {
@@ -151,6 +147,7 @@ function bump(counter: Map<string, number>, id: string) {
  */
 export function generateSchedule(input: GenerateInput): GeneratedSchedule {
   const { year, month, teams, formation, members, unavailable, seed } = input
+  const eligibleMembers = members.filter(isAutomaticScheduleMember)
 
   const rng = createRng(seed)
   const warnings: GenerationWarning[] = []
@@ -159,8 +156,7 @@ export function generateSchedule(input: GenerateInput): GeneratedSchedule {
 
   /** Quem toca cada instrumento, so gente ativa. */
   const byRole = new Map<Role, GeneratorMember[]>(ROLES.map((role) => [role, []]))
-  for (const member of members) {
-    if (!member.active) continue
+  for (const member of eligibleMembers) {
     for (const role of member.roles) byRole.get(role)?.push(member)
   }
 
@@ -174,11 +170,12 @@ export function generateSchedule(input: GenerateInput): GeneratedSchedule {
 
   const usage = new Map<string, number>()
   const gestorUsage = new Map<string, number>()
-  const teamPending = seedPending(input.history ?? [])
+  const pairPreferences = seedPairPreferences(input.history ?? [], teams.length)
 
   // Primeira passada: contabiliza o que esta travado, para o balanceamento da
   // segunda passada ja considerar quem o lider fixou na mao.
   for (const day of scheduledDays) {
+    if (input.exceptions?.has(dateKey(day.date))) continue
     const rows = day.services.map((service) =>
       previousByKey.get(`${dateKey(day.date)}:${service}`),
     )
@@ -215,6 +212,7 @@ export function generateSchedule(input: GenerateInput): GeneratedSchedule {
     const previousRows = day.services.map((service) =>
       previousByKey.get(`${dateKey(day.date)}:${service}`),
     )
+    const pairKey = rotationPairKey(day.date, day.team.id, teams.length)
 
     // Uma linha travada vale para o dia inteiro: se o lider travou a manha, a
     // noite acompanha, senao o domingo se dividiria em duas escalacoes.
@@ -227,11 +225,11 @@ export function generateSchedule(input: GenerateInput): GeneratedSchedule {
           order: entries.length,
           service: day.services[0],
           formation,
-          members,
+          members: eligibleMembers,
           byRole,
           memberById,
           locked: collectLockedCells(previousRows),
-          preferred: teamPending.get(day.team.id),
+          preferred: pairPreferences.get(pairKey),
           unavailable,
           usage,
           gestorUsage,
@@ -239,11 +237,7 @@ export function generateSchedule(input: GenerateInput): GeneratedSchedule {
           warnings,
         })
 
-    if (teamPending.has(day.team.id)) {
-      teamPending.delete(day.team.id)
-    } else {
-      teamPending.set(day.team.id, lineupToPreferred(lineup))
-    }
+    if (!pairPreferences.has(pairKey)) pairPreferences.set(pairKey, lineupToPreferred(lineup))
 
     for (const [index, service] of day.services.entries()) {
       entries.push({
@@ -307,7 +301,32 @@ function drawLineup(args: {
   const { date, order, service, formation, byRole, locked, unavailable } = args
   const { usage, rng, warnings } = args
 
-  const usedToday = new Set<string>()
+  const lockedMemberIds = new Set<string>()
+  for (const assignment of locked.values()) {
+    if (assignment.memberId) lockedMemberIds.add(assignment.memberId)
+  }
+  const usedToday = new Set(lockedMemberIds)
+
+  const reservedBySlot = new Map<string, string>()
+  const reservedIds = new Set<string>()
+  for (const role of ROLES) {
+    for (let position = 0; position < (formation[role] ?? 0); position++) {
+      const key = slotKey(role, position)
+      const preferredId = args.preferred?.get(key)
+      if (
+        !preferredId ||
+        locked.has(key) ||
+        usedToday.has(preferredId) ||
+        reservedIds.has(preferredId) ||
+        unavailable.has(unavailableKey(preferredId, date)) ||
+        !(byRole.get(role) ?? []).some((member) => member.id === preferredId)
+      ) continue
+
+      reservedBySlot.set(key, preferredId)
+      reservedIds.add(preferredId)
+    }
+  }
+
   const lineup: GeneratedAssignment[] = []
 
   for (const role of ROLES) {
@@ -323,9 +342,12 @@ function drawLineup(args: {
       }
 
       const candidatos = (byRole.get(role) ?? []).filter(
-        (m) => !usedToday.has(m.id) && !unavailable.has(unavailableKey(m.id, date)),
+        (m) =>
+          !usedToday.has(m.id) &&
+          !unavailable.has(unavailableKey(m.id, date)) &&
+          (!reservedIds.has(m.id) || m.id === reservedBySlot.get(slotKey(role, position))),
       )
-      const preferido = args.preferred?.get(slotKey(role, position))
+      const preferido = reservedBySlot.get(slotKey(role, position))
       const escolhido =
         candidatos.find((m) => m.id === preferido) ?? pickLeastUsed(candidatos, usage, rng)
 
@@ -365,7 +387,9 @@ function drawLineup(args: {
 
   // As contagens so sobem depois do dia inteiro montado, para nao penalizar
   // quem acabou de entrar na propria linha que esta sendo sorteada.
-  for (const id of usedToday) bump(usage, id)
+  for (const id of usedToday) {
+    if (!lockedMemberIds.has(id)) bump(usage, id)
+  }
 
   markGestor({ ...args, lineup })
 
@@ -440,9 +464,15 @@ function ensureMinistros(args: {
     const removivel = (alvo: Role, minimo: number) => {
       const doNaipe = lineup.filter((a) => a.role === alvo && a.memberId)
       if (doNaipe.length <= minimo) return null
+      const gestores = lineup.filter((a) => a.memberId && memberById.get(a.memberId)?.isGestor).length
       return (
         doNaipe
-          .filter((a) => !a.locked && a !== extra && !memberById.get(a.memberId!)?.isMinistro)
+          .filter((a) =>
+            !a.locked &&
+            a !== extra &&
+            !memberById.get(a.memberId!)?.isMinistro &&
+            (!memberById.get(a.memberId!)?.isGestor || gestores > 1),
+          )
           .sort((a, b) => b.position - a.position)[0] ?? null
       )
     }

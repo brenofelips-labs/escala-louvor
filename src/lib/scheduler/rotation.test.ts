@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { assignTeams, weekIndex, type RotationTeam, type ScheduledDay } from './rotation'
+import { assignTeams, rotationPairKey, weekIndex, type RotationTeam, type ScheduledDay } from './rotation'
 import { buildServiceDays } from './serviceDays'
 
 const TEAMS: RotationTeam[] = [
@@ -162,6 +162,44 @@ describe('assignTeams — continuidade', () => {
     const direto = escalar(2027, 1).map((d) => d.team.id)
     escalar(2026, 12)
     expect(escalar(2027, 1).map((d) => d.team.id)).toEqual(direto)
+  })
+})
+
+describe('rotationPairKey', () => {
+  it('agrupa um domingo e uma quarta do mesmo time sem unir o domingo seguinte', () => {
+    const days = escalar(2026, 8)
+    const key = (date: string) => {
+      const day = days.find((item) => item.date.toISOString().slice(0, 10) === date)!
+      return rotationPairKey(day.date, day.team.id, TEAMS.length)
+    }
+
+    expect(key('2026-08-02')).toBe(key('2026-08-19'))
+    expect(key('2026-08-05')).toBe(key('2026-08-16'))
+    expect(key('2026-08-09')).toBe(key('2026-08-26'))
+    expect(key('2026-08-12')).toBe(key('2026-08-23'))
+    expect(key('2026-08-30')).not.toBe(key('2026-08-02'))
+  })
+
+  it('forma pares com um domingo e uma quarta ao atravessar meses', () => {
+    for (let size = 1; size <= TEAMS.length; size++) {
+      const grouped = new Map<string, ScheduledDay[]>()
+      for (let month = 8; month <= 19; month++) {
+        const year = 2026 + Math.floor((month - 1) / 12)
+        const monthOfYear = ((month - 1) % 12) + 1
+        for (const day of escalar(year, monthOfYear, TEAMS.slice(0, size))) {
+          const key = rotationPairKey(day.date, day.team.id, size)
+          grouped.set(key, [...(grouped.get(key) ?? []), day])
+        }
+      }
+
+      for (const days of grouped.values()) {
+        expect(days.length).toBeLessThanOrEqual(2)
+        if (days.length === 2) {
+          expect(days.filter(ehQuarta)).toHaveLength(1)
+          expect(days.filter((day) => !ehQuarta(day))).toHaveLength(1)
+        }
+      }
+    }
   })
 })
 

@@ -167,6 +167,53 @@ describe('generateSchedule — disponibilidade', () => {
     }
   })
 
+  it('nao sorteia o projeto Taci para a escala normal', () => {
+    const external = {
+      id: 'projeto-taci',
+      name: 'PROJETO TACI',
+      roles: [...ROLES],
+      isGestor: true,
+      isMinistro: true,
+      active: true,
+    }
+
+    for (let seed = 0; seed < 20; seed++) {
+      const schedule = generateSchedule(makeInput({
+        members: [...members, external],
+        seed: String(seed),
+      }))
+      expect(schedule.entries.flatMap((entry) => entry.assignments.map((assignment) => assignment.memberId))).not.toContain(external.id)
+    }
+  })
+
+  it('preserva o projeto Taci quando foi colocado manualmente e travado', () => {
+    const external = {
+      id: 'projeto-taci',
+      name: 'PROJETO TACI',
+      roles: ['TECLADO' as const],
+      isGestor: false,
+      isMinistro: false,
+      active: true,
+    }
+    const previous: GeneratedEntry[] = [{
+      order: 0,
+      date: AUG_2,
+      service: 'DOM_MANHA',
+      teamId: 't1',
+      locked: false,
+      assignments: [
+        { role: 'TECLADO', position: 0, memberId: external.id, isGestor: false, locked: true },
+      ],
+    }]
+    const schedule = generateSchedule(makeInput({
+      members: [...members, external],
+      previous,
+    }))
+
+    expect(cells(schedule.entries[0], 'TECLADO')).toEqual([external.id])
+    expect(cells(schedule.entries[1], 'TECLADO')).toEqual([external.id])
+  })
+
   it('marca A DEFINIR e avisa quando falta gente do instrumento', () => {
     const unavailable = new Set([
       unavailableKey('gt1', AUG_2),
@@ -331,6 +378,66 @@ describe('generateSchedule — travas', () => {
 
     expect(at(segunda, 0, 'GUITARRA')).toEqual([guitarrista.memberId])
   })
+
+  it('reserva quem foi travado numa funcao posterior antes de sortear as anteriores', () => {
+    const customMembers = [
+      { id: 'a', name: 'A', roles: ['BAIXO' as const, 'GUITARRA' as const], isGestor: false, isMinistro: false, active: true },
+      { id: 'b', name: 'B', roles: ['BAIXO' as const], isGestor: false, isMinistro: false, active: true },
+    ]
+    const previous: GeneratedEntry[] = [{
+      order: 0,
+      date: AUG_2,
+      service: 'DOM_MANHA',
+      teamId: 't1',
+      locked: false,
+      assignments: [
+        { role: 'GUITARRA', position: 0, memberId: 'a', isGestor: false, locked: true },
+      ],
+    }]
+    const schedule = generateSchedule(makeInput({
+      members: customMembers,
+      formation: { ...formation, ...Object.fromEntries(ROLES.map((role) => [role, 0])), BAIXO: 1, GUITARRA: 1 },
+      previous,
+    }))
+
+    expect(cells(schedule.entries[0], 'BAIXO')).toEqual(['b'])
+    expect(cells(schedule.entries[0], 'GUITARRA')).toEqual(['a'])
+  })
+
+  it('conta a participacao travada uma vez ao equilibrar os proximos cultos', () => {
+    const customMembers = ['a', 'b'].map((id) => ({
+      id,
+      name: id,
+      roles: ['BAIXO' as const],
+      isGestor: false,
+      isMinistro: false,
+      active: true,
+    }))
+    const previous: GeneratedEntry[] = [{
+      order: 0,
+      date: AUG_2,
+      service: 'DOM_MANHA',
+      teamId: 't1',
+      locked: false,
+      assignments: [
+        { role: 'BAIXO', position: 0, memberId: 'a', isGestor: false, locked: true },
+      ],
+    }]
+    const input = makeInput({
+      members: customMembers,
+      formation: { ...formation, ...Object.fromEntries(ROLES.map((role) => [role, 0])), BAIXO: 1 },
+      previous,
+    })
+    const picked = new Set(
+      Array.from({ length: 20 }, (_, seed) => {
+        const schedule = generateSchedule({ ...input, seed: String(seed) })
+        return cells(schedule.entries[3], 'BAIXO')[0]
+      }),
+    )
+
+    expect(picked).toContain('a')
+    expect(picked).toContain('b')
+  })
 })
 
 describe('generateSchedule — aleatoriedade', () => {
@@ -392,6 +499,101 @@ describe('generateSchedule — padrao domingo e quarta do mesmo time', () => {
     expect(cells(quarta, 'BAIXO')[0]).not.toBe(baixista)
     expect(cells(quarta, 'GUITARRA')).toEqual(cells(domingo, 'GUITARRA'))
     expect(cells(quarta, 'BATERIA')).toEqual(cells(domingo, 'BATERIA'))
+  })
+
+  it('preserva a segunda vocal quando a primeira fica indisponivel no par', () => {
+    const history: GeneratedEntry[] = [{
+      order: 0,
+      date: new Date(Date.UTC(2026, 2, 15)),
+      service: 'DOM_MANHA',
+      teamId: 't1',
+      locked: false,
+      assignments: [
+        { role: 'VOCAL_FEM', position: 0, memberId: 'a', isGestor: false, locked: false },
+        { role: 'VOCAL_FEM', position: 1, memberId: 'b', isGestor: false, locked: false },
+      ],
+    }]
+    const members = ['a', 'b', 'c'].map((id) => ({
+      id,
+      name: id,
+      roles: ['VOCAL_FEM' as const],
+      isGestor: false,
+      isMinistro: false,
+      active: true,
+    }))
+    const input = makeInput({
+      year: 2026,
+      month: 4,
+      members,
+      formation: { ...formation, ...Object.fromEntries(ROLES.map((role) => [role, 0])), VOCAL_FEM: 2 },
+      history,
+      unavailable: new Set([unavailableKey('a', new Date(Date.UTC(2026, 3, 1)))]),
+    })
+
+    for (let seed = 0; seed < 20; seed++) {
+      const schedule = generateSchedule({ ...input, seed: String(seed) })
+      expect(cells(schedule.entries[0], 'VOCAL_FEM')[1], `seed ${seed}`).toBe('b')
+    }
+  })
+})
+
+describe('generateSchedule — continuidade entre meses', () => {
+  it('repete no mes seguinte a escalacao que ficou sem par', () => {
+    const august = generateSchedule(makeInput({ teams: [teams[0]], seed: 'agosto' }))
+    const september = generateSchedule(makeInput({
+      year: 2026,
+      month: 9,
+      teams: [teams[0]],
+      seed: 'setembro',
+      history: august.entries,
+    }))
+
+    expect(lineup(september.entries[0])).toBe(lineup(august.entries.at(-1)!))
+  })
+
+  it('repete a escalacao do domingo de agosto na quarta de setembro do mesmo time', () => {
+    const august = generateSchedule(makeInput({ seed: 'agosto' }))
+    const september = generateSchedule(makeInput({
+      year: 2026,
+      month: 9,
+      seed: 'setembro',
+      history: august.entries,
+    }))
+
+    expect(dayOf(september, '2026-09-16')[0].teamId).toBe(dayOf(august, '2026-08-30')[0].teamId)
+    expect(lineup(dayOf(september, '2026-09-16')[0])).toBe(lineup(dayOf(august, '2026-08-30')[0]))
+  })
+})
+
+describe('generateSchedule — gestor e ministro no mesmo naipe', () => {
+  it('mantem o unico gestor ao acrescentar uma ministra vocal', () => {
+    const customMembers = [
+      { id: 'm', name: 'M', roles: ['VOCAL_MASC' as const], isGestor: false, isMinistro: false, active: true },
+      { id: 'a', name: 'A', roles: ['VOCAL_FEM' as const], isGestor: false, isMinistro: false, active: true },
+      { id: 'b', name: 'B', roles: ['VOCAL_FEM' as const], isGestor: true, isMinistro: false, active: true },
+      { id: 'c', name: 'C', roles: ['VOCAL_FEM' as const], isGestor: false, isMinistro: true, active: true },
+    ]
+    const history: GeneratedEntry[] = [{
+      order: 0,
+      date: new Date(Date.UTC(2026, 6, 29)),
+      service: 'QUARTA',
+      teamId: 't1',
+      locked: false,
+      assignments: [
+        { role: 'VOCAL_MASC', position: 0, memberId: 'm', isGestor: false, locked: false },
+        { role: 'VOCAL_FEM', position: 0, memberId: 'a', isGestor: false, locked: false },
+        { role: 'VOCAL_FEM', position: 1, memberId: 'b', isGestor: true, locked: false },
+      ],
+    }]
+    const schedule = generateSchedule(makeInput({
+      members: customMembers,
+      formation: { ...formation, ...Object.fromEntries(ROLES.map((role) => [role, 0])), VOCAL_MASC: 1, VOCAL_FEM: 2 },
+      history,
+    }))
+
+    expect(cells(schedule.entries[0], 'VOCAL_FEM')).toContain('b')
+    expect(cells(schedule.entries[0], 'VOCAL_FEM')).toContain('c')
+    expect(schedule.entries[0].assignments.find((assignment) => assignment.isGestor)?.memberId).toBe('b')
   })
 })
 
@@ -480,6 +682,63 @@ describe('generateSchedule — dias de excecao', () => {
     expect(schedule.entries).toHaveLength(14)
     expect(schedule.warnings.filter((w) => w.date.toISOString().startsWith('2026-08-16'))).toEqual([])
     expect(dayOf(schedule, '2026-08-19')[0].teamId).not.toBeNull()
+  })
+
+  it('nao transfere o par para outro domingo quando a quarta e especial', () => {
+    const customMembers = ['a', 'b'].map((id) => ({
+      id,
+      name: id,
+      roles: ['BAIXO' as const],
+      isGestor: false,
+      isMinistro: false,
+      active: true,
+    }))
+    const schedule = generateSchedule(makeInput({
+      teams: [teams[0]],
+      members: customMembers,
+      formation: { ...formation, ...Object.fromEntries(ROLES.map((role) => [role, 0])), BAIXO: 1 },
+      exceptions: new Map([['2026-08-05', { kind: 'EM_ABERTO', label: null }]]),
+    }))
+
+    expect(dayOf(schedule, '2026-08-05')[0].assignments).toEqual([])
+    expect(cells(dayOf(schedule, '2026-08-09')[0], 'BAIXO')).not.toEqual(cells(dayOf(schedule, '2026-08-02')[0], 'BAIXO'))
+    expect(cells(dayOf(schedule, '2026-08-12')[0], 'BAIXO')).toEqual(cells(dayOf(schedule, '2026-08-09')[0], 'BAIXO'))
+  })
+
+  it('nao conta uma trava antiga de um dia que virou excecao', () => {
+    const customMembers = ['a', 'b'].map((id) => ({
+      id,
+      name: id,
+      roles: ['BAIXO' as const],
+      isGestor: false,
+      isMinistro: false,
+      active: true,
+    }))
+    const previous: GeneratedEntry[] = [{
+      order: 0,
+      date: AUG_2,
+      service: 'DOM_MANHA',
+      teamId: 't1',
+      locked: false,
+      assignments: [
+        { role: 'BAIXO', position: 0, memberId: 'a', isGestor: false, locked: true },
+      ],
+    }]
+    const input = makeInput({
+      members: customMembers,
+      formation: { ...formation, ...Object.fromEntries(ROLES.map((role) => [role, 0])), BAIXO: 1 },
+      previous,
+      exceptions: new Map([['2026-08-02', { kind: 'EM_ABERTO', label: null }]]),
+    })
+    const picked = new Set(
+      Array.from({ length: 20 }, (_, seed) => {
+        const schedule = generateSchedule({ ...input, seed: String(seed) })
+        return cells(schedule.entries[2], 'BAIXO')[0]
+      }),
+    )
+
+    expect(picked).toContain('a')
+    expect(picked).toContain('b')
   })
 })
 

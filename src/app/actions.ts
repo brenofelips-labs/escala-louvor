@@ -4,7 +4,7 @@ import { revalidatePath } from 'next/cache'
 import { z } from 'zod'
 import { prisma } from '@/lib/db'
 import { roleSchema } from '@/lib/domain/types'
-import { generateSchedule, type GeneratedEntry } from '@/lib/scheduler/generate'
+import { generateSchedule, isAutomaticScheduleMember, type GeneratedEntry } from '@/lib/scheduler/generate'
 import { randomSeed } from '@/lib/scheduler/rng'
 import { recordEvent } from '@/server/events'
 import {
@@ -50,7 +50,7 @@ export async function generateScheduleAction(
     throw new Error('Cadastre pelo menos um time antes de gerar a escala.')
   }
 
-  if (members.filter((m) => m.active).length === 0) {
+  if (!members.some(isAutomaticScheduleMember)) {
     throw new Error('Cadastre os integrantes antes de gerar a escala.')
   }
 

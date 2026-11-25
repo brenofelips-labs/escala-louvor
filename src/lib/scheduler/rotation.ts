@@ -25,6 +25,11 @@ export function weekIndex(date: Date): number {
 
 const ANCHOR_WEEK = weekIndex(new Date(Date.UTC(2026, 7, 2)))
 
+export function rotationPairKey(date: Date, teamId: string, teamCount: number): string {
+  const cycle = Math.floor((weekIndex(date) - ANCHOR_WEEK) / teamCount)
+  return `${teamId}:${cycle}`
+}
+
 const FOUR_TEAM_SEQUENCE = [0, 2, 1, 3]
 
 function sequenceFor(size: number): number[] {
